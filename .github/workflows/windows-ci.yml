@@ -1,0 +1,62 @@
+name: Forge Windows CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile Python sources
+        shell: pwsh
+        run: |
+          python -m py_compile main.py forge/__init__.py forge/schemas.py forge/orchestrator.py forge/web.py forge/windows_release.py
+
+      - name: Test Windows release file generation
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          from forge.windows_release import write_windows_release_files
+
+          required = {
+              'requirements-release.txt',
+              'installer.iss',
+              'build_release.ps1',
+              'build_release.bat',
+              'RELEASE_WINDOWS.md',
+          }
+
+          with TemporaryDirectory() as tmp:
+              root = Path(tmp)
+              write_windows_release_files(root, 'Forge Test Agent', 'forge-test-agent', '1.0.0')
+              missing = sorted(name for name in required if not (root / name).exists())
+              if missing:
+                  raise SystemExit(f'Missing generated release files: {missing}')
+
+              ps1 = (root / 'build_release.ps1').read_text(encoding='utf-8')
+              for marker in ['PyInstaller', 'Get-AuthenticodeSignature', 'installer.iss', '--self-test', 'release-manifest.json']:
+                  if marker not in ps1:
+                      raise SystemExit(f'Missing release gate marker: {marker}')
+          print('Windows release generation test OK')
+          '@ | Set-Content test_release_generation.py -Encoding UTF8
+          python test_release_generation.py
