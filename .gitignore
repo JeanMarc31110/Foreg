@@ -1,0 +1,7 @@
+.venv/
+.env
+__pycache__/
+*.py[cod]
+generated_agents/*
+!generated_agents/.gitkeep
+.DS_Store
