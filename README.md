@@ -12,11 +12,17 @@ AURELIA FORGE est un méta-agent qui reçoit une mission et fabrique un agent sp
 - correction des instructions si nécessaire ;
 - manifeste JSON ;
 - agent Python exécutable ;
-- scripts Windows install/start ;
+- scripts Windows de développement ;
 - interface Web locale ;
-- téléchargement de chaque agent généré en ZIP.
+- téléchargement de chaque agent généré en ZIP ;
+- standard FEWURA Windows obligatoire pour toute release client.
 
-## Installation Windows
+## Standard Windows client
+Forge impose désormais à tout agent Windows destiné à un utilisateur final : vrai EXE, Setup professionnel, données hors de Program Files, test du vrai EXE, installation réelle et test après installation, signature Authenticode de l'EXE et du Setup, vérification de signature et blocage de publication si la signature manque ou est invalide.
+
+Les builds non signés sont réservés au développement et à la QA. Il est interdit de demander aux clients de désactiver Defender, SmartScreen ou Smart App Control. Voir `WINDOWS_RELEASE_STANDARD.md`.
+
+## Installation Windows de Forge
 1. Clonez ou téléchargez le dépôt.
 2. Double-cliquez sur `install.bat`.
 3. Ouvrez `.env`.
