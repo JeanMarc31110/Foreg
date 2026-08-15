@@ -1,0 +1,7 @@
+{
+  "name": "Aurelia Invoice Demo",
+  "slug": "aurelia-invoice-demo",
+  "version": "1.0.0",
+  "purpose": "Démonstration du format d'agent généré par FORGE.",
+  "autonomy_level": 2
+}
