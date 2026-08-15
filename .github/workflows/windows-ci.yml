@@ -28,7 +28,23 @@ jobs:
       - name: Compile Python sources
         shell: pwsh
         run: |
-          python -m py_compile main.py forge/__init__.py forge/schemas.py forge/orchestrator.py forge/web.py forge/windows_release.py
+          python -m py_compile main.py forge/__init__.py forge/schemas.py forge/catalog.py forge/orchestrator.py forge/web.py forge/windows_release.py
+
+      - name: Validate registered agents
+        shell: pwsh
+        run: |
+          @'
+          from forge import list_registered_agents, load_registered_agent
+          agents = list_registered_agents()
+          slugs = {item.get('slug') for item in agents if 'slug' in item}
+          if 'fewura-crm-agent' not in slugs:
+              raise SystemExit(f'FEWURA CRM Agent not registered: {agents}')
+          blueprint = load_registered_agent('fewura-crm-agent')
+          if blueprint.name != 'FEWURA CRM Agent' or blueprint.autonomy_level != 2:
+              raise SystemExit('FEWURA CRM Agent blueprint invalid')
+          print('FEWURA CRM Agent registration OK')
+          '@ | Set-Content test_catalog.py -Encoding UTF8
+          python test_catalog.py
 
       - name: Test Windows release file generation
         shell: pwsh
