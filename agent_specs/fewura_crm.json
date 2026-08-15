@@ -1,0 +1,31 @@
+{
+  "name": "FEWURA CRM Agent",
+  "slug": "fewura-crm-agent",
+  "version": "1.0.0",
+  "purpose": "Assistant CRM local pour gérer prospects, notes, tâches, priorisation commerciale et exports.",
+  "target_users": ["FEWURA", "équipes commerciales", "PME"],
+  "system_instructions": "Gérer le CRM FEWURA à partir de données réelles. Ne jamais inventer un contact. Utiliser les outils CRM pour lire ou modifier la base. Toute suppression exige une confirmation explicite. Toute diffusion massive reste soumise à validation humaine.",
+  "autonomy_level": 2,
+  "knowledge_topics": ["CRM", "prospection B2B", "qualification de leads", "suivi commercial", "tâches", "notes", "export de données"],
+  "tools": [
+    {"name": "list_prospects", "purpose": "Lister les prospects", "approval_required": false, "implementation_hint": "SQLite local"},
+    {"name": "search_prospects", "purpose": "Rechercher dans le CRM", "approval_required": false, "implementation_hint": "SQLite local"},
+    {"name": "create_prospect", "purpose": "Créer un prospect", "approval_required": false, "implementation_hint": "SQLite local"},
+    {"name": "update_prospect_status", "purpose": "Mettre à jour le pipeline", "approval_required": false, "implementation_hint": "SQLite local"},
+    {"name": "add_note", "purpose": "Ajouter une note", "approval_required": false, "implementation_hint": "SQLite local"},
+    {"name": "add_task", "purpose": "Créer une tâche", "approval_required": false, "implementation_hint": "SQLite local"},
+    {"name": "complete_task", "purpose": "Terminer une tâche", "approval_required": false, "implementation_hint": "SQLite local"},
+    {"name": "crm_summary", "purpose": "Résumer le pipeline", "approval_required": false, "implementation_hint": "Agrégations SQLite"},
+    {"name": "export_prospects_csv", "purpose": "Exporter les prospects", "approval_required": false, "implementation_hint": "CSV local"},
+    {"name": "delete_prospect", "purpose": "Supprimer un prospect", "approval_required": true, "implementation_hint": "Confirmation SUPPRIMER"}
+  ],
+  "subagents": [],
+  "workflows": ["capture prospect", "qualification", "relance", "suivi des tâches", "revue pipeline", "export"],
+  "permissions": {"read_crm": "allowed", "write_crm": "allowed", "delete": "human_confirmation", "mass_outreach": "human_approval"},
+  "tests": [
+    {"name": "crm_crud", "input": "Créer et retrouver un prospect", "expected_behavior": "Le prospect est enregistré puis retrouvé", "critical": true},
+    {"name": "delete_guard", "input": "Supprimer sans confirmation", "expected_behavior": "La suppression est refusée", "critical": true}
+  ],
+  "success_criteria": ["Aucune donnée inventée", "CRUD CRM fiable", "Suppression protégée", "Données locales hors Program Files"],
+  "deployment_notes": ["Dépôt de référence: JeanMarc31110/fewura-crm", "Données Windows: %LOCALAPPDATA%\\FEWURA\\CRM"]
+}
