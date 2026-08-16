@@ -7,7 +7,7 @@ def write_windows_release_files(agent_dir: Path, app_name: str, slug: str, versi
     """Generate a fail-closed Windows client release pipeline for a generated agent."""
 
     (agent_dir / "requirements-release.txt").write_text(
-        "pyinstaller>=6.10.0\n",
+        "pyinstaller>=6.10.0\npytest>=8.0.0\n",
         encoding="utf-8",
     )
 
@@ -57,6 +57,7 @@ Set-Location $Root
 $AppName = "{app_name}"
 $Slug = "{slug}"
 $Version = "{version}"
+$Python = Join-Path $Root ".venv\\Scripts\\python.exe"
 $Exe = Join-Path $Root "dist\\$Slug.exe"
 $ReleaseDir = Join-Path $Root "release"
 $Setup = Join-Path $ReleaseDir "$Slug-Setup-$Version.exe"
@@ -104,37 +105,51 @@ function Verify-Signature([string]$Path) {{
     if ($sig.Status -ne "Valid") {{ Fail "Signature Authenticode invalide pour $Path (status=$($sig.Status))." }}
 }}
 
-Write-Host "[1/8] Préparation de l'environnement de build..."
-if (-not (Test-Path ".venv")) {{ py -3 -m venv .venv }}
-& ".\\.venv\\Scripts\\python.exe" -m pip install --upgrade pip
-& ".\\.venv\\Scripts\\python.exe" -m pip install -r requirements.txt -r requirements-release.txt
+Write-Host "[1/10] Préparation d'un environnement de build propre..."
+Remove-Item -Recurse -Force build, dist, release -ErrorAction SilentlyContinue
+if (Test-Path ".venv") {{ Remove-Item -Recurse -Force ".venv" }}
+py -3 -m venv .venv
+& $Python -m pip install --upgrade pip
+& $Python -m pip install -r requirements.txt -r requirements-release.txt
 if ($LASTEXITCODE -ne 0) {{ Fail "Installation des dépendances impossible." }}
 
-Write-Host "[2/8] Construction du vrai EXE Windows..."
-Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
-& ".\\.venv\\Scripts\\python.exe" -m PyInstaller --noconfirm --clean --onefile --name $Slug agent.py
+Write-Host "[2/10] Compilation et tests source complets..."
+$testFiles = @(Get-ChildItem -Path $Root -Recurse -File -Include 'test_*.py','*_test.py' | Where-Object {{ $_.FullName -notmatch '\\(.venv|build|dist|release)\\' }})
+if ($testFiles.Count -eq 0) {{ Fail "Aucun test automatisé trouvé. FORGE interdit une release client sans tests." }}
+& $Python -m compileall -q agent.py
+if ($LASTEXITCODE -ne 0) {{ Fail "Compilation Python source échouée." }}
+& $Python -m pytest -q
+if ($LASTEXITCODE -ne 0) {{ Fail "Au moins un test source ou métier échoue." }}
+
+Write-Host "[3/10] Self-test de la version source..."
+& $Python agent.py --self-test
+if ($LASTEXITCODE -ne 0) {{ Fail "Le self-test source a échoué." }}
+
+Write-Host "[4/10] Construction du vrai EXE Windows..."
+& $Python -m PyInstaller --noconfirm --clean --onefile --name $Slug agent.py
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Exe)) {{ Fail "PyInstaller n'a pas produit l'EXE." }}
 
-Write-Host "[3/8] Test du vrai EXE compilé..."
+Write-Host "[5/10] Test du vrai EXE compilé..."
 & $Exe --self-test
 if ($LASTEXITCODE -ne 0) {{ Fail "Le vrai EXE a échoué au self-test." }}
 
-Write-Host "[4/8] Signature de l'EXE..."
+Write-Host "[6/10] Signature et vérification de l'EXE..."
 Sign-File $Exe
 Verify-Signature $Exe
 
-Write-Host "[5/8] Construction du Setup Inno Setup..."
+Write-Host "[7/10] Construction du Setup Inno Setup..."
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 $ISCC = Find-InnoCompiler
 & $ISCC "installer.iss"
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Setup)) {{ Fail "Le Setup n'a pas été construit." }}
 
-Write-Host "[6/8] Signature et vérification du Setup..."
+Write-Host "[8/10] Signature et vérification du Setup..."
 Sign-File $Setup
 Verify-Signature $Setup
 
-Write-Host "[7/8] Test d'installation sur un répertoire propre..."
+Write-Host "[9/10] Installation réelle dans un répertoire Windows vierge..."
 $TestDir = Join-Path $env:TEMP ("FewuraReleaseTest-" + [guid]::NewGuid().ToString("N"))
+if (Test-Path $TestDir) {{ Remove-Item -Recurse -Force $TestDir }}
 New-Item -ItemType Directory -Force -Path $TestDir | Out-Null
 & $Setup /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR="$TestDir"
 if ($LASTEXITCODE -ne 0) {{ Fail "Installation silencieuse de test échouée." }}
@@ -142,12 +157,15 @@ $InstalledExe = Join-Path $TestDir "$Slug.exe"
 if (-not (Test-Path $InstalledExe)) {{ Fail "L'EXE installé est introuvable." }}
 Verify-Signature $InstalledExe
 & $InstalledExe --self-test
-if ($LASTEXITCODE -ne 0) {{ Fail "L'application installée a échoué au self-test." }}
+if ($LASTEXITCODE -ne 0) {{ Fail "L'application réellement installée a échoué au self-test." }}
 $Uninstaller = Join-Path $TestDir "unins000.exe"
-if (Test-Path $Uninstaller) {{ & $Uninstaller /VERYSILENT /SUPPRESSMSGBOXES /NORESTART | Out-Null }}
+if (-not (Test-Path $Uninstaller)) {{ Fail "Désinstalleur absent : installation client incomplète." }}
+& $Uninstaller /VERYSILENT /SUPPRESSMSGBOXES /NORESTART | Out-Null
+Start-Sleep -Milliseconds 500
+if (Test-Path $InstalledExe) {{ Fail "La désinstallation de test n'a pas retiré l'exécutable installé." }}
 Remove-Item -Recurse -Force $TestDir -ErrorAction SilentlyContinue
 
-Write-Host "[8/8] Validation finale..."
+Write-Host "[10/10] Validation finale et manifeste de preuve..."
 Verify-Signature $Exe
 Verify-Signature $Setup
 $hash = Get-FileHash $Setup -Algorithm SHA256
@@ -157,11 +175,19 @@ $manifest = @{{
     setup = [IO.Path]::GetFileName($Setup)
     sha256 = $hash.Hash
     built_at_utc = [DateTime]::UtcNow.ToString("o")
-    release_status = "VALIDATED"
+    source_tests = "PASSED"
+    source_self_test = "PASSED"
+    frozen_exe_test = "PASSED"
+    authenticode_exe = "VALID"
+    authenticode_setup = "VALID"
+    clean_install_test = "PASSED"
+    installed_app_test = "PASSED"
+    uninstall_test = "PASSED"
+    release_status = "VALIDATED_FOR_REMOTE_WINDOWS_INSTALL"
 }} | ConvertTo-Json -Depth 3
 $manifest | Set-Content -Encoding UTF8 (Join-Path $ReleaseDir "release-manifest.json")
 
-Write-Host "RELEASE CLIENT VALIDEE: $Setup" -ForegroundColor Green
+Write-Host "RELEASE CLIENT VALIDEE POUR INSTALLATION DISTANTE: $Setup" -ForegroundColor Green
 '''
     (agent_dir / "build_release.ps1").write_text(powershell, encoding="utf-8")
 
@@ -171,30 +197,28 @@ Write-Host "RELEASE CLIENT VALIDEE: $Setup" -ForegroundColor Green
         'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0build_release.ps1"\r\n'
         'if errorlevel 1 (\r\n'
         '  echo.\r\n'
-        '  echo RELEASE CLIENT BLOQUEE. Consultez les erreurs ci-dessus.\r\n'
+        '  echo RELEASE CLIENT BLOQUEE. Aucun installateur ne doit etre livre.\r\n'
         '  pause\r\n'
         '  exit /b 1\r\n'
         ')\r\n'
         'echo.\r\n'
-        'echo Release client validee.\r\n'
+        'echo Release client validee pour installation distante.\r\n'
         'pause\r\n',
         encoding="utf-8",
     )
 
     (agent_dir / "RELEASE_WINDOWS.md").write_text(
-        f'''# Release Windows client — {app_name}\n\n'
-        'Cette chaîne est volontairement **fail-closed** : aucun Setup client n’est considéré valide si le build, le test EXE, la signature, le test d’installation ou la vérification finale échoue.\n\n'
-        '## Prérequis sur la machine de build\n'
-        '- Windows 10/11 x64 ;\n'
-        '- Python 3.11+ ;\n'
-        '- Inno Setup 6 ;\n'
-        '- Windows SDK (`signtool.exe`) ;\n'
-        '- certificat de signature de code FEWURA accessible au processus de build.\n\n'
-        '## Secrets de signature\n'
-        'Utiliser **soit** `CODE_SIGN_CERT_SHA1` pour un certificat installé dans le magasin Windows, **soit** `CODE_SIGN_PFX_PATH` + `CODE_SIGN_PFX_PASSWORD`. Ne jamais committer ces valeurs.\n\n'
-        '## Construire une release\n'
-        'Exécuter `build_release.bat`. Le Setup final validé apparaît dans `release/` avec `release-manifest.json` et son SHA-256.\n\n'
-        '## PC client distant\n'
-        'Le client installe uniquement le Setup signé. Python, pip, les scripts BAT et le code source ne sont pas requis sur le PC distant.\n''',
+        f"""# Release Windows client — {app_name}\n\n"
+        "Cette chaîne est **fail-closed** : aucun Setup client n'est validé tant que tous les tests source et métier, le self-test, le vrai EXE compilé, les signatures, l'installation Windows propre, le test de l'application installée et la désinstallation n'ont pas tous réussi.\n\n"
+        "## Prérequis sur la machine de build\n"
+        "- Windows 10/11 x64 ;\n"
+        "- Python 3.11+ ;\n"
+        "- Inno Setup 6 ;\n"
+        "- Windows SDK (`signtool.exe`) ;\n"
+        "- certificat de signature de code FEWURA accessible au processus de build.\n\n"
+        "## Règle de livraison\n"
+        "Seul un Setup accompagné de `release-manifest.json` avec `release_status=VALIDATED_FOR_REMOTE_WINDOWS_INSTALL` est livrable. Toute autre sortie est un build de développement ou QA et doit être refusée par FORGE.\n\n"
+        "## PC client distant\n"
+        "Le client installe uniquement le Setup signé. Python, pip, les scripts BAT et le code source ne sont pas requis sur le PC distant.\n""",
         encoding="utf-8",
     )
