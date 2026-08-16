@@ -19,13 +19,18 @@ WINDOWS_RELEASE_STANDARD = """STANDARD FEWURA WINDOWS OBLIGATOIRE POUR TOUT AGEN
 - produire un EXE Windows autonome et un Setup Inno Setup ou un package MSIX adapte ;
 - le PC client ne doit pas avoir besoin de Python, pip ou du code source ;
 - les donnees modifiables doivent etre stockees hors de Program Files, typiquement sous LOCALAPPDATA ;
+- aucun agent ne peut etre qualifie de livrable si son audit FORGE est inferieur a 90/100 ou contient encore une correction critique ;
+- chaque agent doit posseder des tests automatises, dont au moins un test critique ;
+- executer tous les tests source et metier dans un etat propre et exiger zero echec avant compilation ;
 - tester le vrai EXE compile sur Windows ;
-- construire le Setup seulement si le test du vrai EXE reussit ;
+- construire le Setup seulement si les tests source, metier et EXE reussissent ;
 - signer l'EXE applicatif avant de construire le Setup ;
 - signer ensuite le Setup avec une identite FEWURA publiquement reconnue ;
 - verifier Authenticode de l'EXE et du Setup ;
-- installer le Setup signe dans un environnement Windows propre et tester l'application installee ;
-- bloquer toute release client si build, test, installation ou signature echoue ;
+- installer le Setup signe dans un environnement Windows propre et tester l'application reellement installee ;
+- tester aussi la desinstallation et verifier qu'aucun executable installe ne reste en place ;
+- bloquer toute release client si build, test, installation, desinstallation ou signature echoue ;
+- ne jamais publier ou etiqueter TESTED un artefact issu d'une chaine partiellement rouge ;
 - ne jamais demander au client de desactiver Defender, SmartScreen ou Smart App Control ;
 - les builds non signes sont des builds internes QA uniquement, jamais des releases client ;
 - aucun secret, certificat prive ou mot de passe de signature ne doit etre committe dans Git.
@@ -61,7 +66,7 @@ architect = Agent(
         "Toute action financière, destructive, irréversible ou de diffusion massive doit demander "
         "une validation humaine. Le slug doit être compatible Windows.\n\n"
         + WINDOWS_RELEASE_STANDARD
-        + "\nLe blueprint doit inclure les tests et critères de release nécessaires pour respecter ce standard."
+        + "\nLe blueprint doit inclure plusieurs tests concrets, dont au moins un test critique, et les critères de release nécessaires pour respecter ce standard."
     ),
     output_type=AgentBlueprint,
 )
@@ -75,8 +80,9 @@ auditor = Agent(
         "d'automatisation. Donne un score sur 100 et une version améliorée des instructions si nécessaire.\n\n"
         + WINDOWS_RELEASE_STANDARD
         + "\nPour un agent Windows destiné à des clients, refuse le statut livrable si le blueprint ne prévoit pas "
-        "test du vrai EXE, signature Authenticode de l'EXE et du Setup, test après installation, vérification "
-        "de signature et blocage de release lorsque l'une de ces étapes manque ou échoue."
+        "des tests métier exécutables, le test du vrai EXE, la signature Authenticode de l'EXE et du Setup, "
+        "le test après installation, la désinstallation, la vérification de signature et le blocage de release "
+        "lorsque l'une de ces étapes manque ou échoue. Toute correction critique restante interdit la livraison."
     ),
     output_type=AuditReport,
 )
@@ -196,22 +202,37 @@ Verdict : {audit.verdict}
 
 ## Développement local
 1. Exécuter install.bat.
-2. Ajouter la clé OpenAI dans .env.
+2. Ajouter la clé OpenAI dans .env si l'agent en a réellement besoin.
 3. Exécuter start.bat.
 
 ## Release client Windows
-Exécuter `build_release.bat` sur une machine Windows de build correctement équipée. La chaîne produit un EXE autonome, le teste, le signe, construit et signe un Setup Inno Setup, installe ce Setup dans un répertoire propre, teste l'application installée et génère `release/release-manifest.json` avec le SHA-256.
+Exécuter `build_release.bat` sur une machine Windows de build correctement équipée. La chaîne part d'un environnement propre, exécute tous les tests, effectue le self-test source, produit et teste le vrai EXE, signe l'EXE, construit et signe le Setup, installe ce Setup dans un répertoire propre, teste l'application installée, teste la désinstallation et génère `release/release-manifest.json` avec le SHA-256.
 
-La release est bloquée si une étape échoue. Le PC client n'a besoin ni de Python, ni de pip, ni des scripts de développement.
+La release est bloquée si une seule étape échoue. Le PC client n'a besoin ni de Python, ni de pip, ni des scripts de développement.
+
+Seul un manifeste portant `VALIDATED_FOR_REMOTE_WINDOWS_INSTALL` autorise une livraison à un ordinateur distant.
 
 Voir `RELEASE_WINDOWS.md` et `WINDOWS_RELEASE_STANDARD.md`.
 
 ## Important
-Les intégrations métier réelles (ERP, CRM, banque, messagerie, etc.) nécessitent leurs API et identifiants. Les actions sensibles doivent rester soumises à validation humaine.
+Les intégrations métier réelles (ERP, CRM, banque, messagerie, etc.) nécessitent leurs API et identifiants lorsqu'elles en dépendent réellement. Les actions sensibles doivent rester soumises à validation humaine.
 """
 
 
+def _generated_release_contract_test(blueprint: AgentBlueprint) -> str:
+    return f'''import json\nfrom pathlib import Path\n\nfrom agent import self_test, agent, SYSTEM_INSTRUCTIONS\n\n\ndef test_agent_self_test():\n    assert self_test() == 0\n\n\ndef test_agent_identity_and_instructions():\n    assert agent.name == {blueprint.name!r}\n    assert SYSTEM_INSTRUCTIONS.strip()\n\n\ndef test_blueprint_contains_release_tests():\n    manifest = json.loads((Path(__file__).resolve().parents[1] / "manifest.json").read_text(encoding="utf-8"))\n    tests = manifest.get("tests", [])\n    assert tests, "FORGE interdit une release sans tests declares"\n    assert any(bool(t.get("critical")) for t in tests), "Au moins un test critique est obligatoire"\n    assert all(str(t.get("expected_behavior", "")).strip() for t in tests)\n'''
+
+
 def materialize_agent(blueprint: AgentBlueprint, audit: AuditReport, research_text: str):
+    if audit.score < 90:
+        raise ValueError(f"FORGE bloque la matérialisation : audit insuffisant ({audit.score}/100).")
+    if audit.critical_fixes:
+        raise ValueError("FORGE bloque la matérialisation : corrections critiques restantes : " + "; ".join(audit.critical_fixes))
+    if not blueprint.tests:
+        raise ValueError("FORGE bloque la matérialisation : aucun test métier défini.")
+    if not any(test.critical for test in blueprint.tests):
+        raise ValueError("FORGE bloque la matérialisation : au moins un test critique est obligatoire.")
+
     GENERATED_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder_name = f"{blueprint.slug}_{stamp}"
@@ -228,6 +249,11 @@ def materialize_agent(blueprint: AgentBlueprint, audit: AuditReport, research_te
         + "\n## Secrets de signature\nLes identifiants de signature doivent etre fournis uniquement par le gestionnaire de secrets CI/CD. Ils ne doivent jamais etre places dans le code source ou le ZIP.\n",
         encoding="utf-8",
     )
+    tests_dir = agent_dir / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_release_contract.py").write_text(
+        _generated_release_contract_test(blueprint), encoding="utf-8"
+    )
     (agent_dir / "requirements.txt").write_text(
         "openai-agents>=0.7.0\npython-dotenv>=1.0.1\n", encoding="utf-8"
     )
@@ -238,7 +264,7 @@ def materialize_agent(blueprint: AgentBlueprint, audit: AuditReport, research_te
         '@echo off\ncd /d "%~dp0"\npy -3 -m venv .venv\n'
         'call .venv\\Scripts\\activate.bat\npython -m pip install --upgrade pip\n'
         'pip install -r requirements.txt\nif not exist ".env" copy ".env.example" ".env" >nul\n'
-        'echo Installation de developpement terminee. Configurez .env puis lancez start.bat\npause\n',
+        'echo Installation de developpement terminee. Configurez .env si necessaire puis lancez start.bat\npause\n',
         encoding="utf-8",
     )
     (agent_dir / "start.bat").write_text(
