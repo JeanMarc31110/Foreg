@@ -9,6 +9,7 @@ app = FastAPI(title="AURELIA FORGE", version="1.0.0")
 class BuildRequest(BaseModel):
     request: str = Field(min_length=10)
     autonomy_level: int = Field(default=2, ge=0, le=4)
+    download_url: str = ""
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
@@ -22,7 +23,7 @@ async def health():
 async def build(payload: BuildRequest):
     try:
         blueprint, audit, research = await build_blueprint(payload.request, payload.autonomy_level)
-        package = materialize_agent(blueprint, audit, research)
+        package = materialize_agent(blueprint, audit, research, payload.download_url)
         return {
             "ok": True,
             "blueprint": blueprint.model_dump(),
@@ -30,7 +31,14 @@ async def build(payload: BuildRequest):
             "package": {
                 "folder": package["folder"],
                 "zip": package["zip"],
-                "download_url": f"/download/{package['zip']}"
+                "download_url": f"/download/{package['zip']}",
+                "code_audit": package["code_audit"],
+                "installation": {
+                    "deployment_mode": blueprint.deployment_mode,
+                    "link_install_enabled": blueprint.link_install_enabled,
+                    "download_url": blueprint.download_url or payload.download_url,
+                    "publication": "BLOCKED_UNTIL_VALIDATED",
+                },
             }
         }
     except Exception as exc:
@@ -76,6 +84,7 @@ pre{white-space:pre-wrap;word-break:break-word;color:#c8d0dd}a.dl{display:inline
 <option value="0">0 — Conseil uniquement</option><option value="1">1 — Prépare les actions</option>
 <option value="2" selected>2 — Agit après validation</option><option value="3">3 — Autonomie encadrée</option>
 <option value="4">4 — Autonomie maximale</option></select></label>
+<label>URL Setup HTTPS (optionnelle) <input id="downloadUrl" type="url" placeholder="https://downloads.example.com/agent-Setup.exe" style="min-width:320px;background:#0c1018;color:white;border:1px solid var(--line);border-radius:10px;padding:12px"></label>
 <button id="build" onclick="buildAgent()">CRÉER L'AGENT</button></div>
 <div class="stage"><div id="s1">RECHERCHE</div><div id="s2">ARCHITECTURE</div><div id="s3">AUDIT</div><div id="s4">CORRECTION</div><div id="s5">PACKAGE</div></div>
 <div id="error" class="err" style="margin-top:16px"></div></div>
@@ -89,7 +98,7 @@ async function buildAgent(){
 const request=document.getElementById('request').value.trim();if(request.length<10){document.getElementById('error').textContent="Décrivez plus précisément l'agent.";return}
 const btn=document.getElementById('build');btn.disabled=true;document.getElementById('error').textContent='';document.getElementById('result').style.display='none';stage(1);
 let ticker=1;const interval=setInterval(()=>{ticker=Math.min(4,ticker+1);stage(ticker)},4500);
-try{const res=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request,autonomy_level:parseInt(document.getElementById('autonomy').value)})});
+try{const res=await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request,autonomy_level:parseInt(document.getElementById('autonomy').value),download_url:document.getElementById('downloadUrl').value.trim()})});
 const data=await res.json();if(!res.ok)throw new Error(data.detail||'Erreur inconnue');clearInterval(interval);stage(5);
 setTimeout(()=>{for(let i=1;i<=5;i++)document.getElementById('s'+i).className='done'},250);
 document.getElementById('agentName').textContent=data.blueprint.name+' v'+data.blueprint.version;document.getElementById('purpose').textContent=data.blueprint.purpose;
@@ -99,3 +108,4 @@ document.getElementById('download').href=data.package.download_url;document.getE
 catch(e){clearInterval(interval);document.getElementById('error').textContent='Erreur : '+e.message}finally{btn.disabled=false}}
 </script></body></html>
 """
+
