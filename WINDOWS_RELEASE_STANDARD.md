@@ -22,6 +22,15 @@ Une build n'est pas une release client tant que les contrôles suivants ne sont 
 14. désinstallation et vérification de l'absence de l'EXE installé ;
 15. publication uniquement si toute la chaîne est verte.
 
+## Prérequis et reproductibilité client
+
+- Python et Node doivent être embarqués dans l'EXE gelé ou ne pas être requis ; aucune installation globale d'outil de développement n'est autorisée par défaut ;
+- `release-manifest.json` contient toujours `prerequisites`, avec `name`, `minimum_version`, `official_source`, `detection_method`, `sha256`, `signature` et `status` (`bundled` ou `external`) ;
+- seuls les composants réellement nécessaires au profil de l'agent sont déclarés ; une liste vide signifie que le package est autonome ;
+- le bootstrapper détecte les composants externes, n'installe que ceux qui manquent, ouvre leur installateur avec l'interface Windows/UAC visible et bloque en cas d'accès refusé, d'échec, de hash/signature invalide ou de redémarrage requis ;
+- après les prérequis, le self-check bloque le lancement si le runtime, les ports, les écritures, `%LOCALAPPDATA%`, la base locale, le réseau ou les certificats TLS requis ne sont pas valides ;
+- aucune publication de lien n'est permise si la chaîne n'a pas été reproduite sur une machine Windows propre.
+
 ## Installation depuis un lien client
 
 Chaque agent généré reçoit `install_from_link.ps1`, `release-manifest.json`, `CLIENT_README.md` et `CLIENT_MESSAGE_TEMPLATE.md`.
@@ -43,6 +52,8 @@ Les builds non signés sont réservés au développement/QA. Ils ne doivent jama
 ## Blocage fail-closed
 
 Un finding `critical`, un test disponible échoué, un self-test échoué, un smoke-test échoué, un EXE absent, un Setup absent, une signature invalide, une installation échouée ou une désinstallation incomplète bloque la release. Le pipeline ne doit jamais transformer un échec en statut `VALIDATED_FOR_REMOTE_WINDOWS_INSTALL`.
+
+Pour les projets acceptés par SignPath Foundation, `.github/workflows/signpath-release.yml` est la voie de signature GitHub Actions. Les secrets SignPath doivent rester dans GitHub Actions Secrets. Le workflow doit recevoir un package agent réellement présent dans la branche et ne peut valider une release si l’audit `code-audit.json` est absent ou non `PASSED`.
 
 ## SmartScreen
 
