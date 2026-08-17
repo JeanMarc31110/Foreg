@@ -7,7 +7,7 @@ def write_windows_release_files(agent_dir: Path, app_name: str, slug: str, versi
     """Generate a fail-closed Windows client release pipeline for a generated agent."""
 
     (agent_dir / "requirements-release.txt").write_text(
-        "pyinstaller>=6.10.0\npytest>=8.0.0\n",
+        "pyinstaller==6.10.0\npytest==8.3.3\n",
         encoding="utf-8",
     )
 
@@ -57,6 +57,7 @@ Set-Location $Root
 $AppName = "{app_name}"
 $Slug = "{slug}"
 $Version = "{version}"
+$DownloadUrl = if ($env:FORGE_SETUP_DOWNLOAD_URL) {{ $env:FORGE_SETUP_DOWNLOAD_URL }} else {{ "" }}
 $Python = Join-Path $Root ".venv\\Scripts\\python.exe"
 $Exe = Join-Path $Root "dist\\$Slug.exe"
 $ReleaseDir = Join-Path $Root "release"
@@ -105,6 +106,8 @@ function Verify-Signature([string]$Path) {{
     if ($sig.Status -ne "Valid") {{ Fail "Signature Authenticode invalide pour $Path (status=$($sig.Status))." }}
 }}
 
+if ($DownloadUrl -and -not $DownloadUrl.StartsWith("https://", [System.StringComparison]::OrdinalIgnoreCase)) {{ Fail "FORGE_SETUP_DOWNLOAD_URL doit être HTTPS." }}
+
 Write-Host "[1/10] Préparation d'un environnement de build propre..."
 Remove-Item -Recurse -Force build, dist, release -ErrorAction SilentlyContinue
 if (Test-Path ".venv") {{ Remove-Item -Recurse -Force ".venv" }}
@@ -113,7 +116,11 @@ py -3 -m venv .venv
 & $Python -m pip install -r requirements.txt -r requirements-release.txt
 if ($LASTEXITCODE -ne 0) {{ Fail "Installation des dépendances impossible." }}
 
-Write-Host "[2/10] Compilation et tests source complets..."
+Write-Host "[2/10] Audit de code, compilation et tests source complets..."
+$CodeAuditPath = Join-Path $Root "code-audit.json"
+if (-not (Test-Path $CodeAuditPath)) {{ Fail "Rapport code-audit.json absent" }}
+$CodeAudit = Get-Content $CodeAuditPath -Raw | ConvertFrom-Json
+if ($CodeAudit.verdict -ne "PASSED") {{ Fail "L'audit de code Forge n'est pas PASSED" }}
 $testFiles = @(Get-ChildItem -Path $Root -Recurse -File -Include 'test_*.py','*_test.py' | Where-Object {{ $_.FullName -notmatch '\\(.venv|build|dist|release)\\' }})
 if ($testFiles.Count -eq 0) {{ Fail "Aucun test automatisé trouvé. FORGE interdit une release client sans tests." }}
 & $Python -m compileall -q agent.py
@@ -173,13 +180,16 @@ $manifest = @{{
     app = $AppName
     version = $Version
     setup = [IO.Path]::GetFileName($Setup)
+    download_url = $DownloadUrl
     sha256 = $hash.Hash
+    size_bytes = (Get-Item $Setup).Length
     built_at_utc = [DateTime]::UtcNow.ToString("o")
     source_tests = "PASSED"
     source_self_test = "PASSED"
     frozen_exe_test = "PASSED"
     authenticode_exe = "VALID"
     authenticode_setup = "VALID"
+    manifest_integrity = "SHA256_FILLED_AT_BUILD"
     clean_install_test = "PASSED"
     installed_app_test = "PASSED"
     uninstall_test = "PASSED"
@@ -208,17 +218,23 @@ Write-Host "RELEASE CLIENT VALIDEE POUR INSTALLATION DISTANTE: $Setup" -Foregrou
     )
 
     (agent_dir / "RELEASE_WINDOWS.md").write_text(
-        f"""# Release Windows client — {app_name}\n\n"
-        "Cette chaîne est **fail-closed** : aucun Setup client n'est validé tant que tous les tests source et métier, le self-test, le vrai EXE compilé, les signatures, l'installation Windows propre, le test de l'application installée et la désinstallation n'ont pas tous réussi.\n\n"
-        "## Prérequis sur la machine de build\n"
-        "- Windows 10/11 x64 ;\n"
-        "- Python 3.11+ ;\n"
-        "- Inno Setup 6 ;\n"
-        "- Windows SDK (`signtool.exe`) ;\n"
-        "- certificat de signature de code FEWURA accessible au processus de build.\n\n"
-        "## Règle de livraison\n"
-        "Seul un Setup accompagné de `release-manifest.json` avec `release_status=VALIDATED_FOR_REMOTE_WINDOWS_INSTALL` est livrable. Toute autre sortie est un build de développement ou QA et doit être refusée par FORGE.\n\n"
-        "## PC client distant\n"
-        "Le client installe uniquement le Setup signé. Python, pip, les scripts BAT et le code source ne sont pas requis sur le PC distant.\n""",
+        f"""# Release Windows client — {app_name}
+
+Cette chaîne est **fail-closed** : aucun Setup client n'est validé tant que l'audit de code, tous les tests source et métier, le self-test, le vrai EXE compilé, les signatures, l'installation Windows propre, le test de l'application installée et la désinstallation n'ont pas tous réussi.
+
+## Prérequis sur la machine de build
+- Windows 10/11 x64 ;
+- Python 3.11+ ;
+- Inno Setup 6 ;
+- Windows SDK (`signtool.exe`) ;
+- certificat de signature de code FEWURA accessible au processus de build.
+
+## Règle de livraison
+Seul un Setup accompagné de `release-manifest.json` avec `release_status=VALIDATED_FOR_REMOTE_WINDOWS_INSTALL` est livrable. Toute autre sortie est un build de développement ou QA et doit être refusée par FORGE.
+
+## PC client distant
+Le client installe uniquement le Setup signé. Python, pip, les scripts BAT et le code source ne sont pas requis sur le PC distant.
+""",
         encoding="utf-8",
     )
+
