@@ -112,3 +112,15 @@ jobs:
           '@ | Set-Content test_release_generation.py -Encoding UTF8
           python test_release_generation.py
 
+      - name: Validate SignPath release workflow contract
+        shell: pwsh
+        run: |
+          $workflow = Get-Content .github/workflows/signpath-release.yml -Raw
+          foreach ($marker in @('signpath/github-action-submit-signing-request@v2', 'SIGNPATH_API_TOKEN', 'SIGNPATH_ORGANIZATION_ID', 'SIGNPATH_PROJECT_SLUG', 'SIGNPATH_SIGNING_POLICY_SLUG', 'code-audit.json', 'VALIDATED_FOR_REMOTE_WINDOWS_INSTALL', 'Get-AuthenticodeSignature')) {
+            if ($workflow -notlike "*$marker*") { throw "SignPath workflow marker missing: $marker" }
+          }
+          if ($workflow -match 'BEGIN (RSA|EC|OPENSSH) PRIVATE KEY') { throw 'Clé privée dans le workflow SignPath.' }
+          $hardcoded = Get-Content .github/workflows/signpath-release.yml | Where-Object { $_ -match '^\s*SIGNPATH_API_TOKEN:' -and $_ -notmatch '\$\{\{ secrets\.SIGNPATH_API_TOKEN \}\}' }
+          if ($hardcoded) { throw 'Secret SignPath codé en dur dans le workflow.' }
+          Write-Host 'SignPath workflow contract OK'
+
