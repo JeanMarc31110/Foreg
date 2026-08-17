@@ -35,6 +35,9 @@ class AgentBlueprint(BaseModel):
     tests: List[TestCase] = Field(default_factory=list)
     success_criteria: List[str] = Field(default_factory=list)
     deployment_notes: List[str] = Field(default_factory=list)
+    deployment_mode: str = "client_link"
+    link_install_enabled: bool = True
+    download_url: str = ""
 
 class AuditReport(BaseModel):
     score: int = Field(ge=0, le=100)
@@ -43,3 +46,24 @@ class AuditReport(BaseModel):
     weaknesses: List[str] = Field(default_factory=list)
     critical_fixes: List[str] = Field(default_factory=list)
     improved_system_instructions: str = ""
+
+
+class CodeFinding(BaseModel):
+    severity: str
+    file: str
+    line: int | None = None
+    diagnostic: str
+    proposed_fix: str
+    blocking: bool = False
+
+
+class CodeAuditReport(BaseModel):
+    score: int = Field(default=0, ge=0, le=100)
+    verdict: str = "BLOCKED"
+    findings: List[CodeFinding] = Field(default_factory=list)
+    executed_checks: List[str] = Field(default_factory=list)
+
+    @property
+    def blocking_findings(self) -> List[CodeFinding]:
+        return [finding for finding in self.findings if finding.blocking or finding.severity == "critical"]
+

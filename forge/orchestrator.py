@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
 from agents import Agent, Runner, WebSearchTool
 from .schemas import AgentBlueprint, AuditReport
+from .code_auditor import audit_agent_code
 from .windows_release import write_windows_release_files
+from .remote_install import write_remote_install_files
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 GENERATED_DIR = BASE_DIR / "generated_agents"
@@ -34,6 +37,11 @@ WINDOWS_RELEASE_STANDARD = """STANDARD FEWURA WINDOWS OBLIGATOIRE POUR TOUT AGEN
 - ne jamais demander au client de desactiver Defender, SmartScreen ou Smart App Control ;
 - les builds non signes sont des builds internes QA uniquement, jamais des releases client ;
 - aucun secret, certificat prive ou mot de passe de signature ne doit etre committe dans Git.
+- deployment_mode doit être `client_link` et link_install_enabled doit être explicite ;
+- le lien doit être HTTPS et déclencher uniquement une action volontaire du client ;
+- le bootstrapper doit vérifier le SHA-256 et Authenticode, refuser tout échec et lancer le Setup avec son UI normale ;
+- aucune installation silencieuse, distante ou non consentie ne doit être livrée ;
+- publier le lien uniquement avec un manifeste `VALIDATED_FOR_REMOTE_WINDOWS_INSTALL` complet.
 """
 
 
@@ -82,7 +90,10 @@ auditor = Agent(
         + "\nPour un agent Windows destiné à des clients, refuse le statut livrable si le blueprint ne prévoit pas "
         "des tests métier exécutables, le test du vrai EXE, la signature Authenticode de l'EXE et du Setup, "
         "le test après installation, la désinstallation, la vérification de signature et le blocage de release "
-        "lorsque l'une de ces étapes manque ou échoue. Toute correction critique restante interdit la livraison."
+        "lorsque l'une de ces étapes manque ou échoue. Toute correction critique restante interdit la livraison. "
+        "Le pipeline exécutera ensuite un audit de code déterministe : syntaxe, imports, exceptions, fichiers, "
+        "tests, secrets, dépendances, chemins Windows, fichiers/DB, subprocess et réseau. Tout finding bloquant "
+        "doit empêcher la matérialisation."
     ),
     output_type=AuditReport,
 )
@@ -106,6 +117,8 @@ async def build_blueprint(user_request: str, autonomy_level: int = 2):
     blueprint: AgentBlueprint = architecture_result.final_output
     blueprint.autonomy_level = autonomy_level
     blueprint.slug = _safe_slug(blueprint.slug or blueprint.name)
+    blueprint.deployment_mode = "client_link"
+    blueprint.link_install_enabled = True
 
     audit_result = await Runner.run(
         auditor, "BLUEPRINT À AUDITER :\n" + blueprint.model_dump_json(indent=2)
@@ -200,6 +213,10 @@ Niveau {blueprint.autonomy_level}/4.
 Score : {audit.score}/100
 Verdict : {audit.verdict}
 
+L’audit de code déterministe est exécuté après génération. Il vérifie la syntaxe, les imports, les tests, les secrets,
+les dépendances, les accès système et le parcours self-test/smoke-test. Un finding critique ou un test en échec bloque
+la matérialisation et la release.
+
 ## Développement local
 1. Exécuter install.bat.
 2. Ajouter la clé OpenAI dans .env si l'agent en a réellement besoin.
@@ -214,6 +231,11 @@ Seul un manifeste portant `VALIDATED_FOR_REMOTE_WINDOWS_INSTALL` autorise une li
 
 Voir `RELEASE_WINDOWS.md` et `WINDOWS_RELEASE_STANDARD.md`.
 
+## Installation depuis un lien client
+Cette option standard est volontaire : le client clique sur une URL HTTPS, vérifie le manifeste, puis lance le bootstrapper `install_from_link.ps1`.
+Le bootstrapper vérifie le SHA-256 et la signature Authenticode avant d'ouvrir le Setup avec son interface Windows normale. Il ne réalise aucune installation silencieuse, distante ou non consentie.
+La publication du lien est bloquée tant que `release-manifest.json` ne porte pas le statut `VALIDATED_FOR_REMOTE_WINDOWS_INSTALL`.
+
 ## Important
 Les intégrations métier réelles (ERP, CRM, banque, messagerie, etc.) nécessitent leurs API et identifiants lorsqu'elles en dépendent réellement. Les actions sensibles doivent rester soumises à validation humaine.
 """
@@ -223,7 +245,7 @@ def _generated_release_contract_test(blueprint: AgentBlueprint) -> str:
     return f'''import json\nfrom pathlib import Path\n\nfrom agent import self_test, agent, SYSTEM_INSTRUCTIONS\n\n\ndef test_agent_self_test():\n    assert self_test() == 0\n\n\ndef test_agent_identity_and_instructions():\n    assert agent.name == {blueprint.name!r}\n    assert SYSTEM_INSTRUCTIONS.strip()\n\n\ndef test_blueprint_contains_release_tests():\n    manifest = json.loads((Path(__file__).resolve().parents[1] / "manifest.json").read_text(encoding="utf-8"))\n    tests = manifest.get("tests", [])\n    assert tests, "FORGE interdit une release sans tests declares"\n    assert any(bool(t.get("critical")) for t in tests), "Au moins un test critique est obligatoire"\n    assert all(str(t.get("expected_behavior", "")).strip() for t in tests)\n'''
 
 
-def materialize_agent(blueprint: AgentBlueprint, audit: AuditReport, research_text: str):
+def materialize_agent(blueprint: AgentBlueprint, audit: AuditReport, research_text: str, download_url: str = ""):
     if audit.score < 90:
         raise ValueError(f"FORGE bloque la matérialisation : audit insuffisant ({audit.score}/100).")
     if audit.critical_fixes:
@@ -255,7 +277,7 @@ def materialize_agent(blueprint: AgentBlueprint, audit: AuditReport, research_te
         _generated_release_contract_test(blueprint), encoding="utf-8"
     )
     (agent_dir / "requirements.txt").write_text(
-        "openai-agents>=0.7.0\npython-dotenv>=1.0.1\n", encoding="utf-8"
+        "openai-agents==0.7.0\npython-dotenv==1.0.1\n", encoding="utf-8"
     )
     (agent_dir / ".env.example").write_text(
         "OPENAI_API_KEY=sk-votre-cle-api\nAGENT_MODEL=gpt-5.6-sol\n", encoding="utf-8"
@@ -278,6 +300,24 @@ def materialize_agent(blueprint: AgentBlueprint, audit: AuditReport, research_te
         slug=blueprint.slug,
         version=blueprint.version,
     )
+    write_remote_install_files(
+        agent_dir=agent_dir,
+        app_name=blueprint.name,
+        slug=blueprint.slug,
+        version=blueprint.version,
+        download_url=download_url or blueprint.download_url,
+        enabled=blueprint.link_install_enabled,
+    )
+
+    code_audit = audit_agent_code(agent_dir, blueprint=blueprint, run_tests=True)
+    (agent_dir / "code-audit.json").write_text(code_audit.model_dump_json(indent=2), encoding="utf-8")
+    if code_audit.verdict != "PASSED":
+        blocking = "\\n".join(
+            f"- {item.file}:{item.line or '-'} [{item.severity}] {item.diagnostic}"
+            for item in code_audit.blocking_findings
+        )
+        shutil.rmtree(agent_dir)
+        raise ValueError("FORGE bloque la matérialisation : audit de code échoué.\n" + blocking)
 
     zip_path = GENERATED_DIR / f"{folder_name}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -285,4 +325,10 @@ def materialize_agent(blueprint: AgentBlueprint, audit: AuditReport, research_te
             if path.is_file():
                 zf.write(path, path.relative_to(agent_dir.parent))
 
-    return {"folder": folder_name, "zip": zip_path.name, "zip_path": str(zip_path)}
+    return {
+        "folder": folder_name,
+        "zip": zip_path.name,
+        "zip_path": str(zip_path),
+        "code_audit": code_audit.model_dump(),
+    }
+

@@ -1,0 +1,202 @@
+name: Forge SignPath Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent_path:
+        description: "Chemin du package agent généré présent dans le dépôt"
+        required: true
+        default: "release-agent"
+      slug:
+        description: "Slug Windows de l'agent"
+        required: true
+      version:
+        description: "Version de l'agent"
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sign-and-validate:
+    runs-on: windows-latest
+    env:
+      AGENT_PATH: ${{ inputs.agent_path }}
+      SLUG: ${{ inputs.slug }}
+      VERSION: ${{ inputs.version }}
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+      SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+      SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+      SIGNPATH_SIGNING_POLICY_SLUG: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate SignPath configuration and agent package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @('SIGNPATH_API_TOKEN', 'SIGNPATH_ORGANIZATION_ID', 'SIGNPATH_PROJECT_SLUG', 'SIGNPATH_SIGNING_POLICY_SLUG')
+          foreach ($name in $required) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ([string]::IsNullOrWhiteSpace($value)) { throw "Configuration SignPath manquante : $name" }
+          }
+          $root = Join-Path $env:GITHUB_WORKSPACE $env:AGENT_PATH
+          if (-not (Test-Path (Join-Path $root 'agent.py'))) { throw "agent.py absent dans $root" }
+          if (-not (Test-Path (Join-Path $root 'code-audit.json'))) { throw 'code-audit.json absent : audit Forge obligatoire.' }
+          $audit = Get-Content (Join-Path $root 'code-audit.json') -Raw | ConvertFrom-Json
+          if ($audit.verdict -ne 'PASSED') { throw 'L’audit de code Forge n’est pas PASSED.' }
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install agent dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE $env:AGENT_PATH
+          py -3 -m venv (Join-Path $root '.venv')
+          $python = Join-Path $root '.venv\Scripts\python.exe'
+          & $python -m pip install --upgrade pip
+          & $python -m pip install -r (Join-Path $root 'requirements.txt') -r (Join-Path $root 'requirements-release.txt')
+          if ($LASTEXITCODE -ne 0) { throw 'Installation des dépendances agent échouée.' }
+
+      - name: Run source tests and self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE $env:AGENT_PATH
+          $python = Join-Path $root '.venv\Scripts\python.exe'
+          Push-Location $root
+          try {
+            & $python -m compileall -q .
+            & $python -m pytest -q
+            & $python agent.py --self-test
+            if ($LASTEXITCODE -ne 0) { throw 'Tests source ou self-test échoué.' }
+          } finally { Pop-Location }
+
+      - name: Build unsigned EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE $env:AGENT_PATH
+          $python = Join-Path $root '.venv\Scripts\python.exe'
+          Push-Location $root
+          try {
+            & $python -m PyInstaller --noconfirm --clean --onefile --name $env:SLUG agent.py
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path "dist\$env:SLUG.exe")) { throw 'EXE PyInstaller absent.' }
+            & "dist\$env:SLUG.exe" --self-test
+            if ($LASTEXITCODE -ne 0) { throw 'Self-test EXE non signé échoué.' }
+          } finally { Pop-Location }
+
+      - name: Upload unsigned EXE to GitHub
+        id: upload-exe
+        uses: actions/upload-artifact@v7
+        with:
+          name: forge-unsigned-exe-${{ github.run_id }}
+          path: ${{ inputs.agent_path }}/dist/${{ inputs.slug }}.exe
+          archive: false
+
+      - name: Submit EXE to SignPath
+        id: sign-exe
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-exe.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ runner.temp }}\forge-signed-exe
+          skip-decompress: true
+
+      - name: Verify signed EXE and rebuild Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE $env:AGENT_PATH
+          $signed = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'forge-signed-exe') -Recurse -Filter "$env:SLUG.exe" | Select-Object -First 1
+          if (-not $signed) { throw 'EXE signé absent après SignPath.' }
+          $sig = Get-AuthenticodeSignature $signed.FullName
+          if ($sig.Status -ne 'Valid') { throw "Signature EXE invalide : $($sig.Status)" }
+          Copy-Item $signed.FullName (Join-Path $root "dist\$env:SLUG.exe") -Force
+          $iscc = $env:ISCC_PATH
+          if ([string]::IsNullOrWhiteSpace($iscc)) { $iscc = 'C:\Program Files\Inno Setup 7\ISCC.exe' }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe absent : $iscc" }
+          Push-Location $root
+          try {
+            & $iscc installer.iss
+            if ($LASTEXITCODE -ne 0) { throw 'Construction Setup échouée.' }
+          } finally { Pop-Location }
+          $setup = Join-Path $root "release\$env:SLUG-Setup-$env:VERSION.exe"
+          if (-not (Test-Path $setup)) { throw 'Setup absent après Inno Setup.' }
+
+      - name: Upload unsigned Setup to GitHub
+        id: upload-setup
+        uses: actions/upload-artifact@v7
+        with:
+          name: forge-unsigned-setup-${{ github.run_id }}
+          path: ${{ inputs.agent_path }}/release/${{ inputs.slug }}-Setup-${{ inputs.version }}.exe
+          archive: false
+
+      - name: Submit Setup to SignPath
+        id: sign-setup
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ runner.temp }}\forge-signed-setup
+          skip-decompress: true
+
+      - name: Install, test and uninstall signed Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE $env:AGENT_PATH
+          $signedSetup = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'forge-signed-setup') -Recurse -Filter "*.exe" | Select-Object -First 1
+          if (-not $signedSetup) { throw 'Setup signé absent après SignPath.' }
+          $sig = Get-AuthenticodeSignature $signedSetup.FullName
+          if ($sig.Status -ne 'Valid') { throw "Signature Setup invalide : $($sig.Status)" }
+          $testDir = Join-Path $env:TEMP ('ForgeSignPathTest-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Force $testDir | Out-Null
+          & $signedSetup.FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- "/DIR=$testDir"
+          if ($LASTEXITCODE -ne 0) { throw 'Installation silencieuse échouée.' }
+          $installed = Join-Path $testDir "$env:SLUG.exe"
+          if (-not (Test-Path $installed)) { throw 'EXE installé absent.' }
+          if ((Get-AuthenticodeSignature $installed).Status -ne 'Valid') { throw 'EXE installé non signé.' }
+          & $installed --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Self-test EXE installé échoué.' }
+          $uninstaller = Join-Path $testDir 'unins000.exe'
+          if (-not (Test-Path $uninstaller)) { throw 'Désinstalleur absent.' }
+          & $uninstaller /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+          if ($LASTEXITCODE -ne 0) { throw 'Désinstallation échouée.' }
+          Start-Sleep -Milliseconds 500
+          if (Test-Path $installed) { throw 'EXE présent après désinstallation.' }
+          Remove-Item $testDir -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Publish validated release artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE $env:AGENT_PATH
+          $signedSetup = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'forge-signed-setup') -Recurse -Filter "*.exe" | Select-Object -First 1
+          New-Item -ItemType Directory -Force (Join-Path $root 'release') | Out-Null
+          Copy-Item $signedSetup.FullName (Join-Path $root "release\$env:SLUG-Setup-$env:VERSION.exe") -Force
+          $setup = Join-Path $root "release\$env:SLUG-Setup-$env:VERSION.exe"
+          $hash = Get-FileHash $setup -Algorithm SHA256
+          @{ app=$env:SLUG; version=$env:VERSION; setup=[IO.Path]::GetFileName($setup); sha256=$hash.Hash; built_at_utc=[DateTime]::UtcNow.ToString('o'); signing_provider='SignPath Foundation'; authenticode_setup='VALID'; clean_install_test='PASSED'; installed_app_test='PASSED'; uninstall_test='PASSED'; release_status='VALIDATED_FOR_REMOTE_WINDOWS_INSTALL' } | ConvertTo-Json | Set-Content (Join-Path $root 'release\release-manifest.json') -Encoding UTF8
+
+      - name: Upload validated release
+        uses: actions/upload-artifact@v7
+        with:
+          name: forge-validated-windows-release-${{ inputs.slug }}-${{ inputs.version }}
+          path: ${{ inputs.agent_path }}/release
+

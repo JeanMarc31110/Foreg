@@ -28,7 +28,30 @@ jobs:
       - name: Compile Python sources
         shell: pwsh
         run: |
-          python -m py_compile main.py forge/__init__.py forge/schemas.py forge/catalog.py forge/orchestrator.py forge/web.py forge/windows_release.py
+          python -m compileall -q main.py forge tests
+
+      - name: Run Forge audit tests
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -q
+
+      - name: Smoke test Forge API
+        shell: pwsh
+        run: |
+          @'
+          from fastapi.testclient import TestClient
+          from forge.web import app
+
+          client = TestClient(app)
+          health = client.get('/api/health')
+          if health.status_code != 200 or health.json().get('status') != 'ok':
+              raise SystemExit(f'Health endpoint failed: {health.status_code} {health.text}')
+          invalid = client.post('/api/build', json={'request': 'too short'})
+          if invalid.status_code != 422:
+              raise SystemExit(f'Validation error path failed: {invalid.status_code} {invalid.text}')
+          print('Forge API smoke test OK')
+          '@ | Set-Content test_api.py -Encoding UTF8
+          python test_api.py
 
       - name: Validate registered agents
         shell: pwsh
@@ -70,9 +93,34 @@ jobs:
                   raise SystemExit(f'Missing generated release files: {missing}')
 
               ps1 = (root / 'build_release.ps1').read_text(encoding='utf-8')
-              for marker in ['PyInstaller', 'Get-AuthenticodeSignature', 'installer.iss', '--self-test', 'release-manifest.json']:
+              for marker in ['code-audit.json', 'PyInstaller', 'Get-AuthenticodeSignature', 'installer.iss', '--self-test', 'release-manifest.json']:
                   if marker not in ps1:
                       raise SystemExit(f'Missing release gate marker: {marker}')
+
+          from forge.remote_install import write_remote_install_files
+          with TemporaryDirectory() as tmp:
+              root = Path(tmp)
+              write_remote_install_files(root, 'Forge Test Agent', 'forge-test-agent', '1.0.0', 'https://downloads.example.test/setup.exe')
+              for name in ['install_from_link.ps1', 'release-manifest.json', 'CLIENT_README.md', 'CLIENT_MESSAGE_TEMPLATE.md']:
+                  if not (root / name).exists():
+                      raise SystemExit(f'Missing generated client install file: {name}')
+              bootstrapper = (root / 'install_from_link.ps1').read_text(encoding='utf-8')
+              for marker in ['Invoke-WebRequest', 'Get-FileHash', 'Get-AuthenticodeSignature', 'Start-Process -FilePath $temp -Wait']:
+                  if marker not in bootstrapper:
+                      raise SystemExit(f'Missing bootstrapper marker: {marker}')
           print('Windows release generation test OK')
           '@ | Set-Content test_release_generation.py -Encoding UTF8
           python test_release_generation.py
+
+      - name: Validate SignPath release workflow contract
+        shell: pwsh
+        run: |
+          $workflow = Get-Content .github/workflows/signpath-release.yml -Raw
+          foreach ($marker in @('signpath/github-action-submit-signing-request@v2', 'SIGNPATH_API_TOKEN', 'SIGNPATH_ORGANIZATION_ID', 'SIGNPATH_PROJECT_SLUG', 'SIGNPATH_SIGNING_POLICY_SLUG', 'code-audit.json', 'VALIDATED_FOR_REMOTE_WINDOWS_INSTALL', 'Get-AuthenticodeSignature')) {
+            if ($workflow -notlike "*$marker*") { throw "SignPath workflow marker missing: $marker" }
+          }
+          if ($workflow -match 'BEGIN (RSA|EC|OPENSSH) PRIVATE KEY') { throw 'Clé privée dans le workflow SignPath.' }
+          $hardcoded = Get-Content .github/workflows/signpath-release.yml | Where-Object { $_ -match '^\s*SIGNPATH_API_TOKEN:' -and $_ -notmatch '\$\{\{ secrets\.SIGNPATH_API_TOKEN \}\}' }
+          if ($hardcoded) { throw 'Secret SignPath codé en dur dans le workflow.' }
+          Write-Host 'SignPath workflow contract OK'
+
