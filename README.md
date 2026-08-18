@@ -63,12 +63,34 @@ Les secrets de signature ne sont jamais committés dans Git. Le pipeline utilise
 Le dépôt contient `.github/workflows/windows-ci.yml`, qui vérifie sur Windows la compilation Python de Forge et la génération des fichiers de release.
 
 ## Installation Windows de Forge
-1. Clonez ou téléchargez le dépôt.
-2. Double-cliquez sur `install.bat`.
-3. Ouvrez `.env`.
-4. Ajoutez votre clé API OpenAI.
-5. Double-cliquez sur `start.bat`.
-6. L'interface s'ouvre sur `http://127.0.0.1:8765`.
+
+Option 1 — Installer utilisateur (fichier .exe)
+
+1. Téléchargez Forge_Installer_<version>.exe depuis les releases ou artefacts CI.
+2. Double-cliquez pour lancer l'installation (ou exécutez en silencieux: Forge_Installer_<version>.exe /VERYSILENT /NORESTART).
+
+Option 2 — Déploiement silencieux (entreprise)
+
+Utiliser les scripts fournis dans installer\:
+- PowerShell (recommandé): installer\install-client-pro.ps1 -InstallerPath "C:\\path\\to\\Forge_Installer.exe" -Quiet
+- Batch: installer\install-client-pro.bat Forge_Installer.exe
+
+Construire localement (pour développeurs/QA):
+
+1. Installer Python 3.11+, pip.
+2. pip install -r requirements.txt (ou pip install pyinstaller)
+3. pyinstaller --onefile --name Forge main.py
+4. Installer Inno Setup et lancer ISCC sur installer\\Forge_Installer.iss pour produire le .exe
+
+Signature (optionnelle):
+
+Le pipeline CI peut signer l'exécutable et le setup si les secrets GitHub sont fournis (CODE_SIGN_P12 encodé base64 et CODE_SIGN_PFX_PASSWORD). Ne committez jamais de certificats dans le dépôt.
+
+CI/CD:
+
+La workflow .github/workflows/windows-installer.yml construit l'EXE, crée l'installateur Inno Setup et publie l'artefact. Déclencher via push sur main ou manuellement via workflow_dispatch.
+
+Voir aussi: RELEASE_WINDOWS.md et WINDOWS_RELEASE_STANDARD.md (si présents).
 
 ## Exemple
 Crée un agent spécialisé dans la gestion des factures fournisseurs d'une PME française.

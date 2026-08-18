@@ -1,0 +1,79 @@
+name: Windows Installer CI
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      PYTHON_VERSION: '3.11'
+      ENTRY_POINT: 'main.py'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { pip install -r requirements.txt } else { pip install pyinstaller }
+        shell: pwsh
+
+      - name: Install PyInstaller
+        run: python -m pip install pyinstaller
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller --onefile --name Forge ${{ env.ENTRY_POINT }}
+        shell: pwsh
+
+      - name: Install Inno Setup (choco)
+        run: choco install innosetup -y
+        shell: pwsh
+
+      - name: Run Inno Setup to build installer
+        env:
+          ACTIONS_BUILD_VERSION: ${{ github.ref_name }}
+        run: |
+          $iss = "${{ github.workspace }}\\installer\\Forge_Installer.iss"
+          if (-not (Test-Path $iss)) { Write-Error "ISS script not found: $iss"; exit 1 }
+          # ISCC.exe should be on PATH after choco innosetup
+          & "ISCC.exe" $iss
+        shell: pwsh
+
+      - name: Optional code-signing (PKCS#12 via secret)
+        if: ${{ secrets.CODE_SIGN_P12 && secrets.CODE_SIGN_PASSWORD }}
+        env:
+          PFX_B64: ${{ secrets.CODE_SIGN_P12 }}
+          PFX_PASS: ${{ secrets.CODE_SIGN_PASSWORD }}
+        run: |
+          $pfxPath = "${{ github.workspace }}\\signcert.p12"
+          [System.Convert]::FromBase64String($env:PFX_B64) > $pfxPath
+          Write-Host "Imported PFX to $pfxPath (runner). Use signtool if available to sign the installer."
+          if (Get-Command signtool -ErrorAction SilentlyContinue) {
+            signtool sign /f $pfxPath /p $env:PFX_PASS /tr http://timestamp.digicert.com /td sha256 /fd sha256 "${{ github.workspace }}\\Output\\Forge_Installer_*.exe"
+          } else {
+            Write-Host "signtool not found on runner; skipping automatic signing."
+          }
+        shell: pwsh
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-windows-installer
+          path: |
+            Output\*.exe
+            dist\Forge.exe
+
+      - name: Create Release (if tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: 'Output/*.exe'
