@@ -63,12 +63,66 @@ Les secrets de signature ne sont jamais committés dans Git. Le pipeline utilise
 Le dépôt contient `.github/workflows/windows-ci.yml`, qui vérifie sur Windows la compilation Python de Forge et la génération des fichiers de release.
 
 ## Installation Windows de Forge
+
+### Depuis le source (développement)
 1. Clonez ou téléchargez le dépôt.
 2. Double-cliquez sur `install.bat`.
 3. Ouvrez `.env`.
 4. Ajoutez votre clé API OpenAI.
 5. Double-cliquez sur `start.bat`.
 6. L'interface s'ouvre sur `http://127.0.0.1:8765`.
+
+### Depuis l'installateur professionnel (production)
+
+#### Installation interactive
+1. Téléchargez la dernière release depuis [GitHub Releases](https://github.com/JeanMarc31110/Forge/releases)
+2. Double-cliquez sur `Forge_Setup_*.exe`
+3. Suivez l'assistant d'installation
+4. Forge s'installe dans `C:\Program Files\Forge`
+5. Les raccourcis de bureau et du menu Démarrage sont créés automatiquement
+
+#### Déploiement silencieux (sans interface)
+```powershell
+# Télécharger et installer depuis le script PowerShell
+.\install-client-pro.ps1
+
+# Avec token GitHub (pour authenticated requests)
+.\install-client-pro.ps1 -Token "your-github-token"
+
+# Ou utiliser le wrapper batch
+install-client-pro.bat
+```
+
+#### Déploiement en masse (MDM, SCCM, etc.)
+```batch
+REM Installation avec options
+Forge_Setup_1.0.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+
+REM Désinstallation
+"C:\Program Files\Forge\unins000.exe" /VERYSILENT /NORESTART
+```
+
+### Configuration du code-signing (optionnel)
+
+Pour signer les exécutables avec votre certificat Authenticode :
+
+1. **Ajouter les secrets GitHub :**
+   - `WINDOWS_SIGNING_CERT_BASE64` : Votre certificat PFX encodé en base64
+   - `WINDOWS_SIGNING_CERT_PASSWORD` : Le mot de passe du certificat
+
+2. **Générer base64 du certificat :**
+```powershell
+$cert = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes("C:\path\to\cert.pfx"))
+$cert | Set-Clipboard
+```
+
+3. **Ajouter les secrets dans GitHub :**
+   - Allez à `Settings` > `Secrets and variables` > `Actions`
+   - Créez les deux secrets listés ci-dessus
+
+Le pipeline CI/CD signera automatiquement les exécutables lors des releases.
+
+**Note :** Les builds non signés sont réservés au développement. Ne demandez jamais aux clients de désactiver Windows Defender ou SmartScreen.
 
 ## Exemple
 Crée un agent spécialisé dans la gestion des factures fournisseurs d'une PME française.
